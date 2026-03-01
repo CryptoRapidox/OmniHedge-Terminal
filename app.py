@@ -5,8 +5,8 @@ import pandas as pd
 from datetime import datetime
 import time
 
-# --- 1. SET_PAGE_CONFIG (MUTLAKA EN ÜSTTE OLMALI) ---
-st.set_page_config(page_title="OmniHedge Pro", page_icon="🚀", layout="wide")
+# --- 1. SETUP ---
+st.set_page_config(page_title="OmniHedge Master", page_icon="🚀", layout="wide")
 
 if 'positions' not in st.session_state: st.session_state.positions = []
 if 'selected_token' not in st.session_state: st.session_state.selected_token = "BTC"
@@ -14,91 +14,115 @@ if 'selected_token' not in st.session_state: st.session_state.selected_token = "
 # CSS: rapidox_ Watermark
 st.markdown("""<style>.main::before { content: "rapidox_"; position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%) rotate(-25deg); font-size: 15vw; color: rgba(255, 255, 255, 0.02); z-index: 0; pointer-events: none; }</style>""", unsafe_allow_html=True)
 
-# --- 2. SIDEBAR ---
-st.sidebar.header("⚙️ Terminal Config")
-TRADE_AMOUNT_USD = st.sidebar.number_input("Hedge Amount ($)", min_value=10.0, value=100.0)
+# --- 2. SIDEBAR: 4-DEX API CREDENTIALS ---
+st.sidebar.header("⚙️ Master Configuration")
+TRADE_AMOUNT_USD = st.sidebar.number_input("Hedge Amount per Leg ($)", min_value=10.0, value=100.0)
 
-with st.sidebar.expander("🔑 API Credentials", expanded=True):
-    p_addr = st.text_input("Pacifica Wallet", type="password", key="p_v13")
-    if p_addr: st.success("✅ Connected")
+st.sidebar.divider()
+st.sidebar.subheader("🔑 Secure API Gateway")
 
-# --- 3. BAĞIMSIZ VERİ MOTORU (ASLA KİLİTLENMEZ) ---
-@st.cache_data(ttl=10)
-def fetch_cloud_safe_data():
-    res = {"Variational": {}, "Pacifica": {}, "Reya": {}, "Prices": {}, "Errors": []}
+# 4 Borsa da burada, hiçbirini eksik bırakmadım
+with st.sidebar.expander("1. Pacifica (Primary)", expanded=True):
+    p_addr = st.text_input("Wallet Address", type="password", key="p_v15_a")
+    p_key = st.text_input("Private Key", type="password", key="p_v15_k")
+
+with st.sidebar.expander("2. Variational", expanded=False):
+    v_key = st.text_input("API Key", type="password", key="v_v15")
+
+with st.sidebar.expander("3. Reya Network", expanded=False):
+    r_id = st.text_input("Account ID", type="password", key="r_v15")
+
+with st.sidebar.expander("4. Lighter", expanded=False):
+    l_pub = st.text_input("Public Key", type="password", key="l_v15")
+
+# --- 3. CLOUD-READY DATA ENGINE ---
+@st.cache_data(ttl=5)
+def fetch_terminal_v15():
+    res = {"Variational": {}, "Pacifica": {}, "Reya": {}, "Lighter": {}, "Prices": {}, "Logs": []}
     h = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
 
-    # Her borsa KENDİ try-except bloğunda olmalı!
-    
-    # 1. PACIFICA (Öncelikli Fiyat Kaynağı)
+    # Pacifica
     try:
-        p = requests.get("https://api.pacifica.fi/api/v1/info", headers=h, timeout=7).json()
+        p = requests.get("https://api.pacifica.fi/api/v1/info", headers=h, timeout=5).json()
         if p.get("success"):
             for i in p.get("data", []):
                 s = i.get("symbol")
                 res["Pacifica"][s] = float(i.get("funding_rate") or 0)
                 res["Prices"][s] = float(i.get("mark_price") or i.get("index_price") or 0)
-    except Exception as e: res["Errors"].append(f"Pacifica API Error: {str(e)}")
+    except Exception as e: res["Logs"].append(f"Pacifica: {str(e)}")
 
-    # 2. VARIATIONAL
+    # Variational
     try:
-        v = requests.get("https://omni-client-api.prod.ap-northeast-1.variational.io/metadata/stats", headers=h, timeout=7).json()
-        if v.get("listings"):
-            for i in v.get("listings", []):
-                t = i.get("ticker")
-                res["Variational"][t] = float(i.get("funding_rate", 0))
-                if t not in res["Prices"]: res["Prices"][t] = float(i.get("last_price", 0))
-    except Exception as e: res["Errors"].append(f"Variational API Error: {str(e)}")
+        v = requests.get("https://omni-client-api.prod.ap-northeast-1.variational.io/metadata/stats", headers=h, timeout=5).json()
+        for i in v.get("listings", []):
+            t = i.get("ticker")
+            res["Variational"][t] = float(i.get("funding_rate", 0))
+            if t not in res["Prices"]: res["Prices"][t] = float(i.get("last_price", 0))
+    except Exception as e: res["Logs"].append(f"Variational: {str(e)}")
 
-    # 3. REYA
+    # Reya
     try:
-        r = requests.get("https://api.reya.xyz/v2/markets/summary", headers=h, timeout=7).json()
+        r = requests.get("https://api.reya.xyz/v2/markets/summary", headers=h, timeout=5).json()
         for m in r:
             s = m.get("symbol", "").replace("RUSDPERP", "").replace("PERP", "")
             if s.startswith('k') and len(s) > 1 and s[1].isupper(): s = s[1:]
             res["Reya"][s] = float(m.get("fundingRate", "0"))
             if s not in res["Prices"]: res["Prices"][s] = float(m.get("markPrice", 0))
-    except Exception as e: res["Errors"].append(f"Reya API Error: {str(e)}")
+    except Exception as e: res["Logs"].append(f"Reya: {str(e)}")
 
     return res
 
-# --- 4. ANALİZ VE ARAYÜZ ---
-data = fetch_cloud_safe_data()
-
-# Hataları Sidebar'da göster ki neden "akmadığını" anlayalım
-if data["Errors"]:
-    for err in data["Errors"]: st.sidebar.warning(err)
+# --- 4. ENGINE RUN ---
+data = fetch_terminal_v15()
+if data["Logs"]: 
+    with st.sidebar.expander("⚠️ API Debug Logs"):
+        for log in data["Logs"]: st.write(log)
 
 target_tokens = ['BTC', 'ETH', 'SOL', 'XRP', 'HYPE', 'ADA', 'PAXG', 'AAVE', 'TAO', 'AVAX', 'BNB', 'SUI', 'ENA', 'PUMP', 'BERA', 'IP', 'INJ', 'DOGE', 'VIRTUAL', 'ARB', 'TRUMP', 'LDO', 'LTC', 'EIGEN', 'AERO', 'SEI', 'ZRO', 'TIA', 'TRX', 'UNI', 'PENDLE', 'PEPE', 'ME', 'MOVE', 'WLFI', 'GRASS', 'JUP', 'SHIB', 'JTO', 'TON', 'KAITO', 'CRV', 'LINEA', 'XPL', 'PENGU', 'ONDO', 'NEIRO', 'GOAT', 'NEAR', 'WLD', 'POPCAT', 'LINK', 'SYRUP', 'AI16Z', 'APT', 'PROVE', 'BONK', 'MORPHO', 'S', 'PYTH', 'XAU', 'XAG', 'PLTR', 'NVDA', 'ZEC', 'BCH', 'EURUSD', 'MEGA', 'TSLA', 'PIPPIN']
 
 signals = []
 for t in target_tokens:
-    v, p = data["Variational"].get(t), data["Pacifica"].get(t)
+    v, p, r = data["Variational"].get(t), data["Pacifica"].get(t), data["Reya"].get(t)
     pr = data["Prices"].get(t, 0.0)
-    if v is not None and p is not None:
-        spr = (v - p) * 100
-        if abs(spr) >= 0.1:
-            signals.append({"Token": t, "Spread": spr, "Short": "Var" if spr > 0 else "Pac", "Long": "Pac" if spr > 0 else "Var", "Price": pr})
+    valid = {k: val for k, val in {"Var": v, "Pac": p, "Rey": r}.items() if val is not None}
+    if len(valid) >= 2:
+        spr = (max(valid.values()) - min(valid.values())) * 100
+        if spr >= 0.1:
+            signals.append({"Token": t, "Spread": spr, "Short": max(valid, key=valid.get), "Long": min(valid, key=valid.get), "Price": pr})
+
+# --- 5. UI (UPDATED WITH 2026 SYNTAX) ---
+st.title("🚀 OmniHedge Master Terminal")
+st.caption("Developed by rapidox_ for Pacifica Hackathon")
 
 col_radar, col_exec = st.columns([1.3, 1.2])
+
 with col_radar:
     st.subheader("📡 Arbitrage Radar")
-    if st.button("🔄 Manual Refresh"): st.cache_data.clear(); st.rerun()
     if signals:
-        for s in sorted(signals, key=lambda x: abs(x['Spread']), reverse=True):
-            if st.button(f"🔔 {s['Token']} | Spread: {s['Spread']:.3f}% | ${s['Price']:.4f}", key=f"s_{s['Token']}", use_container_width=True):
+        for s in sorted(signals, key=lambda x: x['Spread'], reverse=True):
+            # use_container_width=True YERİNE width='stretch' KULLANILDI
+            if st.button(f"🔔 {s['Token']} | Spread: {s['Spread']:.3f}% | ${s['Price']:.4f}", key=f"s_{s['Token']}", width='stretch'):
                 st.session_state.selected_token = s['Token']
-    else: st.info("Scanning... Please check Sidebar for API errors.")
+    else: st.info("Scanning for on-chain opportunities...")
 
 with col_exec:
-    st.subheader("⚡ Control & Tracker")
+    st.subheader("⚡ Integrated Control")
     sel = st.selectbox("Asset", target_tokens, index=target_tokens.index(st.session_state.selected_token))
     p = data["Prices"].get(sel, 0.0)
     st.markdown(f"<h1 style='text-align: center; color: #f0b90b;'>${p:.4f}</h1>", unsafe_allow_html=True)
-    if st.button("OPEN HEDGE", type="primary", use_container_width=True):
+    
+    # width='stretch' GÜNCELLEMESİ
+    if st.button("OPEN DUAL-LEG HEDGE", type="primary", width='stretch'):
         st.session_state.positions.append({"Token": sel, "Price": p, "Size": TRADE_AMOUNT_USD, "Time": datetime.now().strftime("%H:%M")})
         st.balloons()
+
     st.divider()
+    st.subheader("💼 Active Position Tracker")
     if st.session_state.positions:
-        st.dataframe(pd.DataFrame(st.session_state.positions), use_container_width=True, hide_index=True)
-        if st.button("Close All"): st.session_state.positions = []; st.rerun()
+        # width='stretch' GÜNCELLEMESİ
+        st.dataframe(pd.DataFrame(st.session_state.positions), width='stretch', hide_index=True)
+        if st.button("Close All", width='stretch'): st.session_state.positions = []; st.rerun()
+    else: st.warning("No active positions.")
+
+time.sleep(1)
+st.rerun()
