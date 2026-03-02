@@ -6,7 +6,7 @@ from datetime import datetime
 import time
 
 # --- 1. AYARLAR ---
-st.set_page_config(page_title="PacificHedge v34.0", page_icon="🚀", layout="wide")
+st.set_page_config(page_title="PacificHedge v35.0", page_icon="🚀", layout="wide")
 
 if 'positions' not in st.session_state: st.session_state.positions = []
 if 'selected_token' not in st.session_state: st.session_state.selected_token = "BTC"
@@ -27,47 +27,30 @@ st.markdown("""
 
 # --- 2. BAKIYE SORGULAMA MOTORU ---
 def get_account_balance(exchange, identifier1, identifier2=None):
-    """
-    Borsaların API'lerine bağlanıp cüzdan bakiyesini çeker.
-    """
     headers = {'User-Agent': 'Mozilla/5.0'}
-    
     try:
         if exchange == "Reya" and identifier1:
-            # Reya API Dokümanına göre: /v2/wallet/{address}/accountBalances
             res = requests.get(f"https://api.reya.xyz/v2/wallet/{identifier1}/accountBalances", timeout=2).json()
             if isinstance(res, list):
-                # RUSD (Reya USD) bakiyesini bul
-                balance = sum(float(b.get("realBalance", 0)) for b in res if b.get("asset") == "RUSD")
-                return balance
+                return sum(float(b.get("realBalance", 0)) for b in res if b.get("asset") == "RUSD")
                 
         elif exchange == "Pacifica" and identifier1:
-            # Pacifica Cüzdan Bakiyesi Ucu
             res = requests.get(f"https://api.pacifica.fi/api/v1/wallet/{identifier1}/balances", headers=headers, timeout=2).json()
             if res.get("success"):
                 return float(res.get("data", {}).get("available_balance", 0))
                 
-        elif exchange == "Variational" and identifier1 and identifier2:
-            # Variational 2'li API Key gerektirir (Key + Secret)
-            auth_headers = {"X-API-KEY": identifier1, "X-API-SECRET": identifier2}
-            res = requests.get("https://omni-client-api.prod.ap-northeast-1.variational.io/v1/account/balance", headers=auth_headers, timeout=2).json()
-            return float(res.get("total_balance", 0))
-            
         elif exchange == "Lighter" and identifier1:
-            # Lighter Cüzdan Bakiyesi
             res = requests.get(f"https://mainnet.zklighter.elliot.ai/api/v1/accounts/{identifier1}/balances", timeout=2).json()
             if isinstance(res, list):
                 return sum(float(b.get("balance", 0)) for b in res if b.get("currency") == "USDC")
                 
     except Exception as e:
-        return None # Bağlantı hatası veya yanlış key
-    
+        return None 
     return None
 
 # --- 3. SIDEBAR (API & CÜZDAN YÖNETİMİ) ---
 st.sidebar.header("⚙️ API & Wallet Config")
 
-# PACIFICA (1 Adres, 1 Key)
 with st.sidebar.expander("🌊 Pacifica Config", expanded=False):
     pac_addr = st.text_input("Wallet Address", key="pac_addr")
     pac_key = st.text_input("API Key / Signature", type="password", key="pac_key")
@@ -76,16 +59,6 @@ with st.sidebar.expander("🌊 Pacifica Config", expanded=False):
         if bal is not None: st.success(f"✅ Connected | Balance: **${bal:,.2f}**")
         else: st.warning("⚠️ Syncing or Invalid Address")
 
-# VARIATIONAL (2 Karmaşık Kod)
-with st.sidebar.expander("🌌 Variational Config", expanded=False):
-    var_key = st.text_input("API Key", type="password", key="var_key")
-    var_sec = st.text_input("API Secret", type="password", key="var_sec")
-    if var_key and var_sec:
-        bal = get_account_balance("Variational", var_key, var_sec)
-        if bal is not None: st.success(f"✅ Connected | Balance: **${bal:,.2f}**")
-        else: st.error("❌ Connection Failed. Check Keys.")
-
-# REYA (1 Adres, 1 Key)
 with st.sidebar.expander("⚡ Reya Config", expanded=False):
     reya_addr = st.text_input("Wallet Address", key="reya_addr")
     reya_key = st.text_input("API / Private Key", type="password", key="reya_key")
@@ -94,7 +67,6 @@ with st.sidebar.expander("⚡ Reya Config", expanded=False):
         if bal is not None: st.success(f"✅ Connected | Balance: **${bal:,.2f}**")
         else: st.warning("⚠️ Syncing or Invalid Address")
 
-# LIGHTER (1 Adres, 1 Key)
 with st.sidebar.expander("🔥 Lighter Config", expanded=False):
     lig_addr = st.text_input("Wallet Address", key="lig_addr")
     lig_key = st.text_input("API Key", type="password", key="lig_key")
@@ -102,6 +74,9 @@ with st.sidebar.expander("🔥 Lighter Config", expanded=False):
         bal = get_account_balance("Lighter", lig_addr)
         if bal is not None: st.success(f"✅ Connected | Balance: **${bal:,.2f}**")
         else: st.warning("⚠️ Syncing or Invalid Address")
+
+with st.sidebar.expander("🌌 Variational Config", expanded=False):
+    st.info("ℹ️ Variational resmi dokümanlarına göre Trading API henüz aktif değildir (Development aşamasında). Bakiye okuma şu an desteklenmiyor.")
 
 # --- 4. KUSURSUZ CANLI VERİ MOTORU ---
 @st.cache_data(ttl=1)
@@ -130,14 +105,22 @@ def fetch_terminal_data():
                 if sym.startswith("BTC"): res["SourcePrices"]["Pacifica"] = price
     except: pass
 
+    # VARIATIONAL DÜZELTMESİ (DOKÜMANA BİREBİR UYGUN)
     try:
         v_data = requests.get("https://omni-client-api.prod.ap-northeast-1.variational.io/metadata/stats", timeout=2).json()
-        if v_data.get("listings"):
-            for i in v_data.get("listings", []):
+        if "listings" in v_data:
+            for i in v_data["listings"]:
                 t = i.get("ticker", "").split("-")[0].upper()
                 funding_val = float(i.get("funding_rate", 0))
-                if funding_val != 0: res["Variational"][t] = funding_val * 100
-                price = float(i.get("last_price", 0))
+                interval_s = float(i.get("funding_interval_s", 28800)) # Saniye cinsinden aralık
+                
+                if funding_val != 0 and interval_s > 0: 
+                    # Bir yıldaki saniye (31536000) / interval = Yılda kaç kez fonlama kestiği
+                    # Formül: Oran * (Yıllık Kesim Sayısı) * 100 = Yıllık APY
+                    res["Variational"][t] = funding_val * (31536000 / interval_s) * 100
+                
+                # FİYAT İÇİN last_price DEĞİL, DOKÜMANDAKİ mark_price KULLANILDI
+                price = float(i.get("mark_price", 0))
                 if price > 0: res["Prices"][t] = price
                 if t.startswith("BTC"): res["SourcePrices"]["Variational"] = price
     except: pass
