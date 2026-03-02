@@ -6,7 +6,7 @@ from datetime import datetime
 import time
 
 # --- 1. AYARLAR ---
-st.set_page_config(page_title="OmniHedge v24.0", page_icon="🚀", layout="wide")
+st.set_page_config(page_title="OmniHedge v26.0", page_icon="🚀", layout="wide")
 
 if 'positions' not in st.session_state: st.session_state.positions = []
 if 'selected_token' not in st.session_state: st.session_state.selected_token = "BTC"
@@ -30,8 +30,8 @@ st.sidebar.header("⚙️ Terminal Config")
 TRADE_AMOUNT_USD = st.sidebar.number_input("Hedge Amount per Leg ($)", min_value=10.0, value=100.0)
 
 with st.sidebar.expander("🔑 API Credentials", expanded=True):
-    p_addr = st.text_input("Pacifica Wallet", type="password", key="p_v24")
-    v_key = st.text_input("Variational Key", type="password", key="v_v24")
+    p_addr = st.text_input("Pacifica Wallet", type="password", key="p_v26")
+    v_key = st.text_input("Variational Key", type="password", key="v_v26")
     if p_addr: st.success("✅ Connected")
 
 # --- 3. MODÜLER VERİ MOTORU ---
@@ -87,11 +87,12 @@ def fetch_terminal_data():
             s_raw = i.get("symbol", "")
             if "BTC" in s_raw.upper():
                 res["SourcePrices"]["Lighter"] = float(i.get("last_price") or i.get("price") or 0)
+            res["Lighter"][s_raw.replace("-PERP", "").replace("-USD", "")] = float(i.get("funding_rate", 0))
     except: pass
 
     return res
 
-# --- 4. TRUE FUNDING MATH (SENİN MANTIĞIN) ---
+# --- 4. KUSURSUZ FUNDING MATEMATİĞİ (DELTA-NEUTRAL) ---
 data = fetch_terminal_data()
 target_tokens = ['BTC', 'ETH', 'SOL', 'XRP', 'HYPE', 'ADA', 'PAXG', 'AAVE', 'TAO', 'AVAX', 'BNB', 'SUI', 'ENA', 'PUMP', 'BERA', 'IP', 'INJ', 'DOGE', 'VIRTUAL', 'ARB', 'TRUMP', 'LDO', 'LTC', 'EIGEN', 'AERO', 'SEI', 'ZRO', 'TIA', 'TRX', 'UNI', 'PENDLE', 'PEPE', 'ME', 'MOVE', 'WLFI', 'GRASS', 'JUP', 'SHIB', 'JTO', 'TON', 'KAITO', 'CRV', 'LINEA', 'XPL', 'PENGU', 'ONDO', 'NEIRO', 'GOAT', 'NEAR', 'WLD', 'POPCAT', 'LINK', 'SYRUP', 'AI16Z', 'APT', 'PROVE', 'BONK', 'MORPHO', 'S', 'PYTH', 'XAU', 'XAG', 'PLTR', 'NVDA', 'ZEC', 'BCH', 'EURUSD', 'MEGA', 'TSLA', 'PIPPIN']
 
@@ -101,33 +102,42 @@ for t in target_tokens:
     price = data["Prices"].get(t, 0.0)
     
     if pac_rate is not None:
-        comparisons = {"Var": data["Variational"].get(t), "Rey": data["Reya"].get(t)}
+        comparisons = {
+            "Var": data["Variational"].get(t), 
+            "Rey": data["Reya"].get(t),
+            "Lig": data["Lighter"].get(t)
+        }
         
-        best_spread = 0
+        best_net_profit = 0
         best_s_l = None
         best_l_l = None
         
         for ex_name, ex_rate in comparisons.items():
             if ex_rate is not None:
-                # MANTIK 1: Short Pacifica, Long Karşı Borsa
-                # Kural: Funding pozitifse Short kazanır, negatifse Long kazanır.
-                # Total Kazanç = (Short Bacağı Kazancı) + (Long Bacağı Kazancı)
-                profit_scenario_1 = (pac_rate - ex_rate) * 100
+                # DİKKAT: Gerçek Delta-Neutral Hesaplaması
+                # Long Bacağı Getirisi = -1 * Oran
+                # Short Bacağı Getirisi = 1 * Oran
                 
-                # MANTIK 2: Long Pacifica, Short Karşı Borsa
-                profit_scenario_2 = (ex_rate - pac_rate) * 100
+                # SENARYO 1: Pacifica SHORT, Karşı Borsa LONG
+                profit_s1 = (pac_rate * 1) + (ex_rate * -1)
                 
-                # Hangi senaryo daha çok kazandırıyorsa onu seç
-                if profit_scenario_1 > best_spread and profit_scenario_1 >= 0.1:
-                    best_spread = profit_scenario_1
+                # SENARYO 2: Pacifica LONG, Karşı Borsa SHORT
+                profit_s2 = (pac_rate * -1) + (ex_rate * 1)
+                
+                # En yüksek NET KAZANCI (% cinsinden) bul
+                if profit_s1 * 100 > best_net_profit and profit_s1 * 100 >= 0.1:
+                    best_net_profit = profit_s1 * 100
                     best_s_l, best_l_l = "Pac", ex_name
                     
-                if profit_scenario_2 > best_spread and profit_scenario_2 >= 0.1:
-                    best_spread = profit_scenario_2
+                if profit_s2 * 100 > best_net_profit and profit_s2 * 100 >= 0.1:
+                    best_net_profit = profit_s2 * 100
                     best_s_l, best_l_l = ex_name, "Pac"
                     
-        if best_spread >= 0.1:
-            signals.append({"Token": t, "Spread": best_spread, "Short": best_s_l, "Long": best_l_l, "Price": price})
+        # Yalnızca gerçek anlamda kârlı işlemler listeye alınır
+        if best_net_profit >= 0.1:
+            signals.append({"Token": t, "Profit": best_net_profit, "Short": best_s_l, "Long": best_l_l, "Price": price})
+
+signals = sorted(signals, key=lambda x: x['Profit'], reverse=True)
 
 # --- 5. ARAYÜZ ---
 st.title("🚀 OmniHedge Ultimate Terminal")
@@ -143,15 +153,23 @@ p_col4.metric("Lighter BTC", f"${sp['Lighter']:,.2f}" if sp['Lighter'] > 0 else 
 
 st.divider()
 
-st.caption(f"Status: {data['Status'].get('Binance', '🟢')} CEX | {data['Status'].get('Pacifica', '🟢')} Pacifica | Active Signals: {len(signals)}")
+if signals:
+    best_trade = signals[0]
+    st.success(f"💡 **OmniHedge Advisor Önerisi:** Şu an en kârlı net arbitraj fırsatı **{best_trade['Token']}** token'ında! "
+               f"Pacifica merkezli stratejiye göre **{best_trade['Short']}** borsasında SHORT, "
+               f"**{best_trade['Long']}** borsasında LONG açarak **Net %{best_trade['Profit']:.3f}** risk-free funding kârı elde edebilirsiniz.")
+else:
+    st.info("💡 **OmniHedge Advisor:** Şu an Pacifica merkezli risk-free (net %0.1 üzeri) kârlı bir işlem bulunmuyor. Piyasa taranmaya devam ediliyor...")
+
+st.divider()
 
 c_radar, c_exec = st.columns([1.3, 1.2])
 
 with c_radar:
     st.subheader("📡 Pacifica-Centric Radar")
     if signals:
-        for s in sorted(signals, key=lambda x: x['Spread'], reverse=True):
-            btn_label = f"🔔 {s['Token']} | Total Profit: {s['Spread']:.3f}% | ${s['Price']:.2f}"
+        for s in signals:
+            btn_label = f"🔔 {s['Token']} | Net Profit: {s['Profit']:.3f}% | ${s['Price']:.2f}"
             if st.button(btn_label, key=f"btn_{s['Token']}", width='stretch'):
                 st.session_state.selected_token = s['Token']
     else: st.info("Scanning Market Data...")
@@ -178,7 +196,7 @@ with c_exec:
         
         if st.button("OPEN HEDGE POSITION", type="primary", width='stretch'):
             st.session_state.positions.append({
-                "Token": sel, "Size": TRADE_AMOUNT_USD, "Entry": cur_p, "Spread": match['Spread'] if match else 0,
+                "Token": sel, "Size": TRADE_AMOUNT_USD, "Entry": cur_p, "Profit": match['Profit'] if match else 0,
                 "Time": time.time(), "DisplayTime": datetime.now().strftime("%H:%M:%S")
             })
             st.balloons()
@@ -188,7 +206,8 @@ with c_exec:
     if st.session_state.positions:
         for pos in st.session_state.positions:
             elapsed = time.time() - pos['Time']
-            pos['PnL'] = (pos['Spread'] / 100 / 86400) * elapsed * pos['Size']
+            # PnL Hesaplamasında da net profit kullanıldı
+            pos['PnL'] = (pos['Profit'] / 100 / 86400) * elapsed * pos['Size']
         
         df = pd.DataFrame(st.session_state.positions)[['Token', 'Size', 'Entry', 'DisplayTime', 'PnL']]
         st.dataframe(df.style.format({"PnL": "{:.6f}$", "Entry": "{:.4f}$"}), width='stretch', hide_index=True)
