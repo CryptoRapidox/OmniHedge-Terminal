@@ -6,7 +6,7 @@ from datetime import datetime
 import time
 
 # --- 1. AYARLAR ---
-st.set_page_config(page_title="PacificHedge v33.0", page_icon="🚀", layout="wide")
+st.set_page_config(page_title="PacificHedge v34.0", page_icon="🚀", layout="wide")
 
 if 'positions' not in st.session_state: st.session_state.positions = []
 if 'selected_token' not in st.session_state: st.session_state.selected_token = "BTC"
@@ -25,15 +25,85 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- 2. SIDEBAR ---
-st.sidebar.header("⚙️ Terminal Config")
-TRADE_AMOUNT_USD = st.sidebar.number_input("Hedge Amount per Leg ($)", min_value=10.0, value=100.0)
+# --- 2. BAKIYE SORGULAMA MOTORU ---
+def get_account_balance(exchange, identifier1, identifier2=None):
+    """
+    Borsaların API'lerine bağlanıp cüzdan bakiyesini çeker.
+    """
+    headers = {'User-Agent': 'Mozilla/5.0'}
+    
+    try:
+        if exchange == "Reya" and identifier1:
+            # Reya API Dokümanına göre: /v2/wallet/{address}/accountBalances
+            res = requests.get(f"https://api.reya.xyz/v2/wallet/{identifier1}/accountBalances", timeout=2).json()
+            if isinstance(res, list):
+                # RUSD (Reya USD) bakiyesini bul
+                balance = sum(float(b.get("realBalance", 0)) for b in res if b.get("asset") == "RUSD")
+                return balance
+                
+        elif exchange == "Pacifica" and identifier1:
+            # Pacifica Cüzdan Bakiyesi Ucu
+            res = requests.get(f"https://api.pacifica.fi/api/v1/wallet/{identifier1}/balances", headers=headers, timeout=2).json()
+            if res.get("success"):
+                return float(res.get("data", {}).get("available_balance", 0))
+                
+        elif exchange == "Variational" and identifier1 and identifier2:
+            # Variational 2'li API Key gerektirir (Key + Secret)
+            auth_headers = {"X-API-KEY": identifier1, "X-API-SECRET": identifier2}
+            res = requests.get("https://omni-client-api.prod.ap-northeast-1.variational.io/v1/account/balance", headers=auth_headers, timeout=2).json()
+            return float(res.get("total_balance", 0))
+            
+        elif exchange == "Lighter" and identifier1:
+            # Lighter Cüzdan Bakiyesi
+            res = requests.get(f"https://mainnet.zklighter.elliot.ai/api/v1/accounts/{identifier1}/balances", timeout=2).json()
+            if isinstance(res, list):
+                return sum(float(b.get("balance", 0)) for b in res if b.get("currency") == "USDC")
+                
+    except Exception as e:
+        return None # Bağlantı hatası veya yanlış key
+    
+    return None
 
-with st.sidebar.expander("🔑 API Credentials", expanded=True):
-    p_addr = st.text_input("Pacifica Wallet", type="password", key="p_v33")
-    v_key = st.text_input("Variational Key", type="password", key="v_v33")
+# --- 3. SIDEBAR (API & CÜZDAN YÖNETİMİ) ---
+st.sidebar.header("⚙️ API & Wallet Config")
 
-# --- 3. KUSURSUZ CANLI VERİ MOTORU (SİTE ARAYÜZÜ APY SENKRONİZASYONU) ---
+# PACIFICA (1 Adres, 1 Key)
+with st.sidebar.expander("🌊 Pacifica Config", expanded=False):
+    pac_addr = st.text_input("Wallet Address", key="pac_addr")
+    pac_key = st.text_input("API Key / Signature", type="password", key="pac_key")
+    if pac_addr:
+        bal = get_account_balance("Pacifica", pac_addr)
+        if bal is not None: st.success(f"✅ Connected | Balance: **${bal:,.2f}**")
+        else: st.warning("⚠️ Syncing or Invalid Address")
+
+# VARIATIONAL (2 Karmaşık Kod)
+with st.sidebar.expander("🌌 Variational Config", expanded=False):
+    var_key = st.text_input("API Key", type="password", key="var_key")
+    var_sec = st.text_input("API Secret", type="password", key="var_sec")
+    if var_key and var_sec:
+        bal = get_account_balance("Variational", var_key, var_sec)
+        if bal is not None: st.success(f"✅ Connected | Balance: **${bal:,.2f}**")
+        else: st.error("❌ Connection Failed. Check Keys.")
+
+# REYA (1 Adres, 1 Key)
+with st.sidebar.expander("⚡ Reya Config", expanded=False):
+    reya_addr = st.text_input("Wallet Address", key="reya_addr")
+    reya_key = st.text_input("API / Private Key", type="password", key="reya_key")
+    if reya_addr:
+        bal = get_account_balance("Reya", reya_addr)
+        if bal is not None: st.success(f"✅ Connected | Balance: **${bal:,.2f}**")
+        else: st.warning("⚠️ Syncing or Invalid Address")
+
+# LIGHTER (1 Adres, 1 Key)
+with st.sidebar.expander("🔥 Lighter Config", expanded=False):
+    lig_addr = st.text_input("Wallet Address", key="lig_addr")
+    lig_key = st.text_input("API Key", type="password", key="lig_key")
+    if lig_addr:
+        bal = get_account_balance("Lighter", lig_addr)
+        if bal is not None: st.success(f"✅ Connected | Balance: **${bal:,.2f}**")
+        else: st.warning("⚠️ Syncing or Invalid Address")
+
+# --- 4. KUSURSUZ CANLI VERİ MOTORU ---
 @st.cache_data(ttl=1)
 def fetch_terminal_data():
     res = {
@@ -43,74 +113,55 @@ def fetch_terminal_data():
     }
     headers = {'User-Agent': 'Mozilla/5.0'}
 
-    # 1. Binance Fiyatları
     try:
         p_res = requests.get("https://api.binance.com/api/v3/ticker/price", timeout=2).json()
         res["Prices"] = {item['symbol'].replace('USDT', ''): float(item['price']) for item in p_res if 'USDT' in item['symbol']}
-    except: res["Status"]["Binance"] = "🔴"
+    except: pass
 
-    # 2. Pacifica (1 Saatlik API verisi -> Site APY'sine [Yıllık %] çevirilir)
     try:
         p_data = requests.get("https://api.pacifica.fi/api/v1/info/prices", headers=headers, timeout=2).json()
         if p_data.get("success"):
             for i in p_data.get("data", []):
                 sym = i.get("symbol", "").split("-")[0].upper()
                 funding_val = float(i.get("funding") or 0)
-                if funding_val != 0:
-                    # Sitede Yazan Yıllık APR Formülü: Saatlik * 24 * 365 * 100
-                    res["Pacifica"][sym] = funding_val * 24 * 365 * 100
-                
+                if funding_val != 0: res["Pacifica"][sym] = funding_val * 24 * 365 * 100
                 price = float(i.get("mark") or i.get("oracle") or 0)
                 if price > 0: res["Prices"][sym] = price
                 if sym.startswith("BTC"): res["SourcePrices"]["Pacifica"] = price
-    except: res["Status"]["Pacifica"] = "🔴"
+    except: pass
 
-    # 3. Variational (API zaten Yıllık Decimal döner -> Site APY'sine [%] çevirilir)
     try:
         v_data = requests.get("https://omni-client-api.prod.ap-northeast-1.variational.io/metadata/stats", timeout=2).json()
         if v_data.get("listings"):
             for i in v_data.get("listings", []):
                 t = i.get("ticker", "").split("-")[0].upper()
                 funding_val = float(i.get("funding_rate", 0))
-                if funding_val != 0:
-                    # Sitede Yazan Yıllık APR Formülü: Decimal * 100
-                    res["Variational"][t] = funding_val * 100
-                
+                if funding_val != 0: res["Variational"][t] = funding_val * 100
                 price = float(i.get("last_price", 0))
                 if price > 0: res["Prices"][t] = price
                 if t.startswith("BTC"): res["SourcePrices"]["Variational"] = price
     except: pass
 
-    # 4. Reya (1 Saatlik API verisi -> Site APY'sine [Yıllık %] çevirilir)
     try:
         r_data = requests.get("https://api.reya.xyz/v2/markets/summary", timeout=2).json()
         for m in r_data:
             s_raw = m.get("symbol", "")
             s = s_raw.replace("RUSDPERP", "").replace("PERP", "").split("-")[0].upper()
             if s.startswith('K') and len(s) > 1: s = s[1:]
-            
             funding_val = float(m.get("fundingRate", "0"))
-            if funding_val != 0:
-                # Sitede Yazan Yıllık APR Formülü: Saatlik * 24 * 365 * 100
-                res["Reya"][s] = funding_val * 24 * 365 * 100
-            
+            if funding_val != 0: res["Reya"][s] = funding_val * 24 * 365 * 100
             price = float(m.get("throttledPoolPrice", 0))
             if price > 0: res["Prices"][s] = price
             if s_raw.upper().startswith("BTC"): res["SourcePrices"]["Reya"] = price
     except: pass
 
-    # 5. Lighter (API zaten Yıllık Decimal döner -> Site APY'sine [%] çevirilir)
     try:
         l_res = requests.get("https://mainnet.zklighter.elliot.ai/api/v1/markets", timeout=2).json()
         for i in l_res:
             s_raw = i.get("symbol", "")
             s = s_raw.replace("-PERP", "").replace("-USD", "").split("-")[0].upper()
-            
             funding_val = float(i.get("funding_rate", 0))
-            if funding_val != 0:
-                # Sitede Yazan Yıllık APR Formülü: Decimal * 100
-                res["Lighter"][s] = funding_val * 100
-            
+            if funding_val != 0: res["Lighter"][s] = funding_val * 100
             price = float(i.get("last_price") or i.get("price") or 0)
             if price > 0: res["Prices"][s] = price
             if s_raw.upper().startswith("BTC"): res["SourcePrices"]["Lighter"] = price
@@ -118,7 +169,7 @@ def fetch_terminal_data():
 
     return res
 
-# --- 4. SİTE APY'LERİNE GÖRE DELTA-NEUTRAL MATEMATİĞİ ---
+# --- 5. GÜNLÜK DELTA-NEUTRAL MATEMATİĞİ ---
 data = fetch_terminal_data()
 target_tokens = ['BTC', 'ETH', 'SOL', 'XRP', 'HYPE', 'ADA', 'PAXG', 'AAVE', 'TAO', 'AVAX', 'BNB', 'SUI', 'ENA', 'PUMP', 'BERA', 'IP', 'INJ', 'DOGE', 'VIRTUAL', 'ARB', 'TRUMP', 'LDO', 'LTC', 'EIGEN', 'AERO', 'SEI', 'ZRO', 'TIA', 'TRX', 'UNI', 'PENDLE', 'PEPE', 'ME', 'MOVE', 'WLFI', 'GRASS', 'JUP', 'SHIB', 'JTO', 'TON', 'KAITO', 'CRV', 'LINEA', 'XPL', 'PENGU', 'ONDO', 'NEIRO', 'GOAT', 'NEAR', 'WLD', 'POPCAT', 'LINK', 'SYRUP', 'AI16Z', 'APT', 'PROVE', 'BONK', 'MORPHO', 'S', 'PYTH', 'XAU', 'XAG', 'PLTR', 'NVDA', 'ZEC', 'BCH', 'EURUSD', 'MEGA', 'TSLA', 'PIPPIN']
 
@@ -128,24 +179,16 @@ for t in target_tokens:
     price = data["Prices"].get(t, 0.0)
     
     if pac_apr is not None and pac_apr != 0 and price > 0:
-        comparisons = {
-            "Var": data["Variational"].get(t), 
-            "Rey": data["Reya"].get(t),
-            "Lig": data["Lighter"].get(t)
-        }
-        
+        comparisons = {"Var": data["Variational"].get(t), "Rey": data["Reya"].get(t), "Lig": data["Lighter"].get(t)}
         best_net_apr = 0
         best_s_l = None
         best_l_l = None
         
         for ex_name, ex_apr in comparisons.items():
             if ex_apr is not None and ex_apr != 0:
-                # İki borsa da sitelerinde yazan YILLIK APY'ye eşitlendiği için
-                # -%50 ile +%50 burada toplanınca tam 0 eder.
                 profit_s1_apr = (pac_apr * 1) + (ex_apr * -1)
                 profit_s2_apr = (pac_apr * -1) + (ex_apr * 1)
                 
-                # Yıllık minimum %7 Net Kâr Arama (Günlük ~%0.02'ye denk gelir)
                 if profit_s1_apr > best_net_apr and profit_s1_apr >= 7.0:
                     best_net_apr = profit_s1_apr
                     best_s_l, best_l_l = "Pac", ex_name
@@ -154,15 +197,13 @@ for t in target_tokens:
                     best_net_apr = profit_s2_apr
                     best_s_l, best_l_l = ex_name, "Pac"
                     
-        # Aşırı uçuk API hatalarını filtrele (Yıllık %3650 üzeri net kâr gerçek dışıdır)
         if 7.0 <= best_net_apr <= 3650.0:
-            # Ekranda kolay okunsun diye Yıllık APR'yi Günlük Net %'ye çevirip kaydediyoruz
             daily_net_profit = best_net_apr / 365
             signals.append({"Token": t, "Profit": daily_net_profit, "Short": best_s_l, "Long": best_l_l, "Price": price})
 
 signals = sorted(signals, key=lambda x: x['Profit'], reverse=True)
 
-# --- 5. ARAYÜZ ---
+# --- 6. ARAYÜZ ---
 st.title("🚀 PacificHedge Terminal")
 
 st.subheader("📊 Live BTC Price Monitoring")
@@ -228,7 +269,6 @@ with c_exec:
     if st.session_state.positions:
         for pos in st.session_state.positions:
             elapsed = time.time() - pos['Time']
-            # PnL Hesabı: (Günlük Net Kâr / 100 / 86400 saniye) * Geçen Saniye * İşlem Boyutu
             pos['PnL'] = (pos['Profit'] / 100 / 86400) * elapsed * pos['Size']
         
         df = pd.DataFrame(st.session_state.positions)[['Token', 'Size', 'Entry', 'DisplayTime', 'PnL']]
