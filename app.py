@@ -6,12 +6,11 @@ from datetime import datetime
 import time
 
 # --- 1. AYARLAR ---
-st.set_page_config(page_title="OmniHedge v23.0", page_icon="🚀", layout="wide")
+st.set_page_config(page_title="OmniHedge v24.0", page_icon="🚀", layout="wide")
 
 if 'positions' not in st.session_state: st.session_state.positions = []
 if 'selected_token' not in st.session_state: st.session_state.selected_token = "BTC"
 
-# CSS: rapidox_ Watermark ve Stil
 st.markdown("""
     <style>
     .main { background-color: #0b0e11; }
@@ -31,11 +30,11 @@ st.sidebar.header("⚙️ Terminal Config")
 TRADE_AMOUNT_USD = st.sidebar.number_input("Hedge Amount per Leg ($)", min_value=10.0, value=100.0)
 
 with st.sidebar.expander("🔑 API Credentials", expanded=True):
-    p_addr = st.text_input("Pacifica Wallet", type="password", key="p_v23")
-    v_key = st.text_input("Variational Key", type="password", key="v_v23")
+    p_addr = st.text_input("Pacifica Wallet", type="password", key="p_v24")
+    v_key = st.text_input("Variational Key", type="password", key="v_v24")
     if p_addr: st.success("✅ Connected")
 
-# --- 3. MODÜLER VERİ MOTORU (YENİ PACIFICA API UYUMLU) ---
+# --- 3. MODÜLER VERİ MOTORU ---
 @st.cache_data(ttl=10)
 def fetch_terminal_data():
     res = {
@@ -45,26 +44,21 @@ def fetch_terminal_data():
     }
     headers = {'User-Agent': 'Mozilla/5.0'}
 
-    # 1. Binance Fiyatları
     try:
         p_res = requests.get("https://api.binance.com/api/v3/ticker/price", timeout=3).json()
         res["Prices"] = {item['symbol'].replace('USDT', ''): float(item['price']) for item in p_res if 'USDT' in item['symbol']}
     except: res["Status"]["Binance"] = "🔴"
 
-    # 2. Pacifica (RESMİ API DOCS GÜNCELLEMESİ)
     try:
-        # Endpoint '/api/v1/info/prices' olarak güncellendi
         p_data = requests.get("https://api.pacifica.fi/api/v1/info/prices", headers=headers, timeout=5).json()
         if p_data.get("success"):
             for i in p_data.get("data", []):
                 sym = i.get("symbol", "")
-                # Field isimleri 'funding' ve 'mark' olarak düzeltildi
                 res["Pacifica"][sym] = float(i.get("funding") or 0)
                 if "BTC" in sym.upper():
                     res["SourcePrices"]["Pacifica"] = float(i.get("mark") or i.get("oracle") or 0)
     except: res["Status"]["Pacifica"] = "🔴"
 
-    # 3. Variational
     try:
         v_data = requests.get("https://omni-client-api.prod.ap-northeast-1.variational.io/metadata/stats", timeout=5).json()
         if v_data.get("listings"):
@@ -75,7 +69,6 @@ def fetch_terminal_data():
                     res["SourcePrices"]["Variational"] = float(i.get("last_price", 0))
     except: pass
 
-    # 4. Reya
     try:
         r_data = requests.get("https://api.reya.xyz/v2/markets/summary", timeout=5).json()
         for m in r_data:
@@ -88,7 +81,6 @@ def fetch_terminal_data():
             res["Reya"][s] = float(m.get("fundingRate", "0"))
     except: pass
 
-    # 5. Lighter
     try:
         l_res = requests.get("https://mainnet.zklighter.elliot.ai/api/v1/markets", timeout=5).json()
         for i in l_res:
@@ -99,38 +91,43 @@ def fetch_terminal_data():
 
     return res
 
-# --- 4. PACIFICA MERKEZLİ ANALİZ ---
+# --- 4. TRUE FUNDING MATH (SENİN MANTIĞIN) ---
 data = fetch_terminal_data()
 target_tokens = ['BTC', 'ETH', 'SOL', 'XRP', 'HYPE', 'ADA', 'PAXG', 'AAVE', 'TAO', 'AVAX', 'BNB', 'SUI', 'ENA', 'PUMP', 'BERA', 'IP', 'INJ', 'DOGE', 'VIRTUAL', 'ARB', 'TRUMP', 'LDO', 'LTC', 'EIGEN', 'AERO', 'SEI', 'ZRO', 'TIA', 'TRX', 'UNI', 'PENDLE', 'PEPE', 'ME', 'MOVE', 'WLFI', 'GRASS', 'JUP', 'SHIB', 'JTO', 'TON', 'KAITO', 'CRV', 'LINEA', 'XPL', 'PENGU', 'ONDO', 'NEIRO', 'GOAT', 'NEAR', 'WLD', 'POPCAT', 'LINK', 'SYRUP', 'AI16Z', 'APT', 'PROVE', 'BONK', 'MORPHO', 'S', 'PYTH', 'XAU', 'XAG', 'PLTR', 'NVDA', 'ZEC', 'BCH', 'EURUSD', 'MEGA', 'TSLA', 'PIPPIN']
 
 signals = []
 for t in target_tokens:
-    pacifica_rate = data["Pacifica"].get(t)
+    pac_rate = data["Pacifica"].get(t)
     price = data["Prices"].get(t, 0.0)
     
-    if pacifica_rate is not None:
-        comparisons = {
-            "Var": data["Variational"].get(t),
-            "Rey": data["Reya"].get(t)
-        }
+    if pac_rate is not None:
+        comparisons = {"Var": data["Variational"].get(t), "Rey": data["Reya"].get(t)}
         
         best_spread = 0
-        best_counter_exchange = None
+        best_s_l = None
+        best_l_l = None
         
         for ex_name, ex_rate in comparisons.items():
             if ex_rate is not None:
-                spread = abs(pacifica_rate - ex_rate) * 100
-                if spread > best_spread:
-                    best_spread = spread
-                    best_counter_exchange = ex_name
-                    
-        if best_spread >= 0.1 and best_counter_exchange:
-            if pacifica_rate > comparisons[best_counter_exchange]:
-                s_l, l_l = "Pac", best_counter_exchange
-            else:
-                s_l, l_l = best_counter_exchange, "Pac"
+                # MANTIK 1: Short Pacifica, Long Karşı Borsa
+                # Kural: Funding pozitifse Short kazanır, negatifse Long kazanır.
+                # Total Kazanç = (Short Bacağı Kazancı) + (Long Bacağı Kazancı)
+                profit_scenario_1 = (pac_rate - ex_rate) * 100
                 
-            signals.append({"Token": t, "Spread": best_spread, "Short": s_l, "Long": l_l, "Price": price})
+                # MANTIK 2: Long Pacifica, Short Karşı Borsa
+                profit_scenario_2 = (ex_rate - pac_rate) * 100
+                
+                # Hangi senaryo daha çok kazandırıyorsa onu seç
+                if profit_scenario_1 > best_spread and profit_scenario_1 >= 0.1:
+                    best_spread = profit_scenario_1
+                    best_s_l, best_l_l = "Pac", ex_name
+                    
+                if profit_scenario_2 > best_spread and profit_scenario_2 >= 0.1:
+                    best_spread = profit_scenario_2
+                    best_s_l, best_l_l = ex_name, "Pac"
+                    
+        if best_spread >= 0.1:
+            signals.append({"Token": t, "Spread": best_spread, "Short": best_s_l, "Long": best_l_l, "Price": price})
 
 # --- 5. ARAYÜZ ---
 st.title("🚀 OmniHedge Ultimate Terminal")
@@ -154,7 +151,7 @@ with c_radar:
     st.subheader("📡 Pacifica-Centric Radar")
     if signals:
         for s in sorted(signals, key=lambda x: x['Spread'], reverse=True):
-            btn_label = f"🔔 {s['Token']} | Spread: {s['Spread']:.3f}% | ${s['Price']:.2f}"
+            btn_label = f"🔔 {s['Token']} | Total Profit: {s['Spread']:.3f}% | ${s['Price']:.2f}"
             if st.button(btn_label, key=f"btn_{s['Token']}", width='stretch'):
                 st.session_state.selected_token = s['Token']
     else: st.info("Scanning Market Data...")
