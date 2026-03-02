@@ -6,7 +6,7 @@ from datetime import datetime
 import time
 
 # --- 1. AYARLAR ---
-st.set_page_config(page_title="PacificHedge v28.0", page_icon="🚀", layout="wide")
+st.set_page_config(page_title="PacificHedge v29.0", page_icon="🚀", layout="wide")
 
 if 'positions' not in st.session_state: st.session_state.positions = []
 if 'selected_token' not in st.session_state: st.session_state.selected_token = "BTC"
@@ -30,11 +30,11 @@ st.sidebar.header("⚙️ Terminal Config")
 TRADE_AMOUNT_USD = st.sidebar.number_input("Hedge Amount per Leg ($)", min_value=10.0, value=100.0)
 
 with st.sidebar.expander("🔑 API Credentials", expanded=True):
-    p_addr = st.text_input("Pacifica Wallet", type="password", key="p_v28")
-    v_key = st.text_input("Variational Key", type="password", key="v_v28")
+    p_addr = st.text_input("Pacifica Wallet", type="password", key="p_v29")
+    v_key = st.text_input("Variational Key", type="password", key="v_v29")
     if p_addr: st.success("✅ Connected")
 
-# --- 3. MODÜLER VERİ MOTORU (APR NORMALIZER EKLENDİ) ---
+# --- 3. MODÜLER VERİ MOTORU (24 SAATLİK GÜNLÜK HESAPLAMA) ---
 @st.cache_data(ttl=10)
 def fetch_terminal_data():
     res = {
@@ -44,9 +44,9 @@ def fetch_terminal_data():
     }
     headers = {'User-Agent': 'Mozilla/5.0'}
     
-    # Çarpanlar (Elmaları ve Armutları Yıllık % APR'de eşitlemek için)
-    HOURLY_TO_APR = 24 * 365 * 100
-    ANNUAL_TO_APR = 100
+    # GÜNLÜK (24 SAATLİK) ÇARPANLAR
+    HOURLY_TO_DAILY = 24 * 100       # Saatlik veriyi 24 ile çarpıp % yap
+    ANNUAL_TO_DAILY = (1 / 365) * 100  # Yıllık veriyi 365'e bölüp % yap
 
     # 1. Binance
     try:
@@ -54,34 +54,35 @@ def fetch_terminal_data():
         res["Prices"] = {item['symbol'].replace('USDT', ''): float(item['price']) for item in p_res if 'USDT' in item['symbol']}
     except: res["Status"]["Binance"] = "🔴"
 
-    # 2. Pacifica (Saatlik veriyi Yıllık APR'ye çeviriyoruz)
+    # 2. Pacifica (Saatlik -> Günlük %)
     try:
         p_data = requests.get("https://api.pacifica.fi/api/v1/info/prices", headers=headers, timeout=5).json()
         if p_data.get("success"):
             for i in p_data.get("data", []):
-                sym = i.get("symbol", "").split("-")[0].upper() # BTC-PERP gelse bile BTC yapar
-                # NORMALİZASYON: Pacifica ham verisi -> Yıllık % APR
-                res["Pacifica"][sym] = float(i.get("funding") or 0) * HOURLY_TO_APR
+                sym = i.get("symbol", "").split("-")[0].upper()
+                # 24 Saatlik Kâr Hesabı
+                res["Pacifica"][sym] = float(i.get("funding") or 0) * HOURLY_TO_DAILY
                 
                 price = float(i.get("mark") or i.get("oracle") or 0)
                 if sym not in res["Prices"] or res["Prices"][sym] == 0: res["Prices"][sym] = price
                 if sym == "BTC": res["SourcePrices"]["Pacifica"] = price
     except: res["Status"]["Pacifica"] = "🔴"
 
-    # 3. Variational (Zaten Yıllık geliyor, sadece 100 ile %'ye çeviriyoruz)
+    # 3. Variational (Yıllık -> Günlük %)
     try:
         v_data = requests.get("https://omni-client-api.prod.ap-northeast-1.variational.io/metadata/stats", timeout=5).json()
         if v_data.get("listings"):
             for i in v_data.get("listings", []):
                 t = i.get("ticker", "").split("-")[0].upper()
-                res["Variational"][t] = float(i.get("funding_rate", 0)) * ANNUAL_TO_APR
+                # 24 Saatlik Kâr Hesabı
+                res["Variational"][t] = float(i.get("funding_rate", 0)) * ANNUAL_TO_DAILY
                 
                 price = float(i.get("last_price", 0))
                 if t not in res["Prices"] or res["Prices"][t] == 0: res["Prices"][t] = price
                 if t == "BTC": res["SourcePrices"]["Variational"] = price
     except: pass
 
-    # 4. Reya (Saatlik/8 Saatlik -> Yıllık % APR)
+    # 4. Reya (Saatlik -> Günlük %)
     try:
         r_data = requests.get("https://api.reya.xyz/v2/markets/summary", timeout=5).json()
         for m in r_data:
@@ -89,21 +90,23 @@ def fetch_terminal_data():
             s = s_raw.replace("RUSDPERP", "").replace("PERP", "").split("-")[0].upper()
             if s.startswith('K') and len(s) > 1: s = s[1:]
             
-            res["Reya"][s] = float(m.get("fundingRate", "0")) * HOURLY_TO_APR
+            # 24 Saatlik Kâr Hesabı
+            res["Reya"][s] = float(m.get("fundingRate", "0")) * HOURLY_TO_DAILY
             
             price = float(m.get("markPrice", 0))
             if s not in res["Prices"] or res["Prices"][s] == 0: res["Prices"][s] = price
             if s == "BTC" or "BTC" in s_raw.upper(): res["SourcePrices"]["Reya"] = price
     except: pass
 
-    # 5. Lighter (Saatlik -> Yıllık % APR)
+    # 5. Lighter (Saatlik -> Günlük %)
     try:
         l_res = requests.get("https://mainnet.zklighter.elliot.ai/api/v1/markets", timeout=5).json()
         for i in l_res:
             s_raw = i.get("symbol", "")
             s = s_raw.replace("-PERP", "").replace("-USD", "").split("-")[0].upper()
             
-            res["Lighter"][s] = float(i.get("funding_rate", 0)) * HOURLY_TO_APR
+            # 24 Saatlik Kâr Hesabı
+            res["Lighter"][s] = float(i.get("funding_rate", 0)) * HOURLY_TO_DAILY
             
             price = float(i.get("last_price") or i.get("price") or 0)
             if s not in res["Prices"] or res["Prices"][s] == 0: res["Prices"][s] = price
@@ -112,16 +115,16 @@ def fetch_terminal_data():
 
     return res
 
-# --- 4. KUSURSUZ APR FUNDING MATEMATİĞİ (DELTA-NEUTRAL) ---
+# --- 4. GÜNLÜK DELTA-NEUTRAL MATEMATİĞİ ---
 data = fetch_terminal_data()
 target_tokens = ['BTC', 'ETH', 'SOL', 'XRP', 'HYPE', 'ADA', 'PAXG', 'AAVE', 'TAO', 'AVAX', 'BNB', 'SUI', 'ENA', 'PUMP', 'BERA', 'IP', 'INJ', 'DOGE', 'VIRTUAL', 'ARB', 'TRUMP', 'LDO', 'LTC', 'EIGEN', 'AERO', 'SEI', 'ZRO', 'TIA', 'TRX', 'UNI', 'PENDLE', 'PEPE', 'ME', 'MOVE', 'WLFI', 'GRASS', 'JUP', 'SHIB', 'JTO', 'TON', 'KAITO', 'CRV', 'LINEA', 'XPL', 'PENGU', 'ONDO', 'NEIRO', 'GOAT', 'NEAR', 'WLD', 'POPCAT', 'LINK', 'SYRUP', 'AI16Z', 'APT', 'PROVE', 'BONK', 'MORPHO', 'S', 'PYTH', 'XAU', 'XAG', 'PLTR', 'NVDA', 'ZEC', 'BCH', 'EURUSD', 'MEGA', 'TSLA', 'PIPPIN']
 
 signals = []
 for t in target_tokens:
-    pac_apr = data["Pacifica"].get(t)
+    pac_daily = data["Pacifica"].get(t)
     price = data["Prices"].get(t, 0.0)
     
-    if pac_apr is not None and price > 0:
+    if pac_daily is not None and price > 0:
         comparisons = {
             "Var": data["Variational"].get(t), 
             "Rey": data["Reya"].get(t),
@@ -132,24 +135,24 @@ for t in target_tokens:
         best_s_l = None
         best_l_l = None
         
-        for ex_name, ex_apr in comparisons.items():
-            if ex_apr is not None:
-                # ARTIK HER ŞEY EŞİT MİZANDA (YILLIK APR %)
+        for ex_name, ex_daily in comparisons.items():
+            if ex_daily is not None:
                 # Senaryo 1: Pacifica SHORT (+1), Karşı Borsa LONG (-1)
-                profit_s1 = (pac_apr * 1) + (ex_apr * -1)
+                profit_s1 = (pac_daily * 1) + (ex_daily * -1)
                 
                 # Senaryo 2: Pacifica LONG (-1), Karşı Borsa SHORT (+1)
-                profit_s2 = (pac_apr * -1) + (ex_apr * 1)
+                profit_s2 = (pac_daily * -1) + (ex_daily * 1)
                 
-                if profit_s1 > best_net_profit and profit_s1 >= 0.1:
+                # Minimum Günlük %0.02 Net Kâr Arama (Yıllık %7.3'e denk gelir)
+                if profit_s1 > best_net_profit and profit_s1 >= 0.02:
                     best_net_profit = profit_s1
                     best_s_l, best_l_l = "Pac", ex_name
                     
-                if profit_s2 > best_net_profit and profit_s2 >= 0.1:
+                if profit_s2 > best_net_profit and profit_s2 >= 0.02:
                     best_net_profit = profit_s2
                     best_s_l, best_l_l = ex_name, "Pac"
                     
-        if best_net_profit >= 0.1:
+        if best_net_profit >= 0.02:
             signals.append({"Token": t, "Profit": best_net_profit, "Short": best_s_l, "Long": best_l_l, "Price": price})
 
 signals = sorted(signals, key=lambda x: x['Profit'], reverse=True)
@@ -170,21 +173,21 @@ st.divider()
 
 if signals:
     best_trade = signals[0]
-    st.success(f"💡 **PacificHedge Advisor:** Şu an en kârlı arbitraj fırsatı **{best_trade['Token']}**! "
+    st.success(f"💡 **PacificHedge Advisor:** Şu an en kârlı 24 saatlik arbitraj fırsatı **{best_trade['Token']}**! "
                f"**{best_trade['Short']}** borsasında SHORT, "
-               f"**{best_trade['Long']}** borsasında LONG açarak **Yıllık Net %{best_trade['Profit']:.2f} APR** kâr elde edebilirsiniz.")
+               f"**{best_trade['Long']}** borsasında LONG açarak **24 Saatte Net %{best_trade['Profit']:.3f}** kâr elde edebilirsiniz.")
 else:
-    st.info("💡 **PacificHedge Advisor:** Şu an risk-free kârlı bir işlem bulunmuyor. Piyasa taranmaya devam ediliyor...")
+    st.info("💡 **PacificHedge Advisor:** Şu an risk-free günlük kârlı bir işlem bulunmuyor. Piyasa taranmaya devam ediliyor...")
 
 st.divider()
 
 c_radar, c_exec = st.columns([1.3, 1.2])
 
 with c_radar:
-    st.subheader("📡 Pacifica-Centric Radar (APR %)")
+    st.subheader("📡 Pacifica-Centric Radar (24s Kâr)")
     if signals:
         for s in signals:
-            btn_label = f"🔔 {s['Token']} | Net Yıllık APR: %{s['Profit']:.2f} | ${s['Price']:.2f}"
+            btn_label = f"🔔 {s['Token']} | 24s Net: %{s['Profit']:.3f} | ${s['Price']:.2f}"
             if st.button(btn_label, key=f"btn_{s['Token']}", width='stretch'):
                 st.session_state.selected_token = s['Token']
     else: st.info("Scanning Market Data...")
@@ -221,6 +224,7 @@ with c_exec:
     if st.session_state.positions:
         for pos in st.session_state.positions:
             elapsed = time.time() - pos['Time']
+            # Artık PnL hesaplanırken günlük net kar kullanılıyor (1 günde o karı elde ediyorsun)
             pos['PnL'] = (pos['Profit'] / 100 / 86400) * elapsed * pos['Size']
         
         df = pd.DataFrame(st.session_state.positions)[['Token', 'Size', 'Entry', 'DisplayTime', 'PnL']]
