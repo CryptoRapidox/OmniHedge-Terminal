@@ -6,7 +6,7 @@ from datetime import datetime
 import time
 
 # --- 1. AYARLAR ---
-st.set_page_config(page_title="PacificHedge v30.0", page_icon="🚀", layout="wide")
+st.set_page_config(page_title="PacificHedge v31.0", page_icon="🚀", layout="wide")
 
 if 'positions' not in st.session_state: st.session_state.positions = []
 if 'selected_token' not in st.session_state: st.session_state.selected_token = "BTC"
@@ -30,11 +30,12 @@ st.sidebar.header("⚙️ Terminal Config")
 TRADE_AMOUNT_USD = st.sidebar.number_input("Hedge Amount per Leg ($)", min_value=10.0, value=100.0)
 
 with st.sidebar.expander("🔑 API Credentials", expanded=True):
-    p_addr = st.text_input("Pacifica Wallet", type="password", key="p_v30")
-    v_key = st.text_input("Variational Key", type="password", key="v_v30")
+    p_addr = st.text_input("Pacifica Wallet", type="password", key="p_v31")
+    v_key = st.text_input("Variational Key", type="password", key="v_v31")
 
-# --- 3. KUSURSUZ VERİ & ÇARPAN MOTORU ---
-@st.cache_data(ttl=10)
+# --- 3. KUSURSUZ CANLI VERİ MOTORU (1 Saniye Yenileme) ---
+# ttl=1 yapıldı. Artık sistem her 1 saniyede bir borsalardan en taze veriyi çekecek.
+@st.cache_data(ttl=1)
 def fetch_terminal_data():
     res = {
         "Variational": {}, "Pacifica": {}, "Reya": {}, "Lighter": {}, 
@@ -42,20 +43,19 @@ def fetch_terminal_data():
     }
     headers = {'User-Agent': 'Mozilla/5.0'}
 
-    # 1. Binance Fiyatları
+    # 1. Binance Fiyatları (Yedek)
     try:
-        p_res = requests.get("https://api.binance.com/api/v3/ticker/price", timeout=3).json()
+        p_res = requests.get("https://api.binance.com/api/v3/ticker/price", timeout=2).json()
         res["Prices"] = {item['symbol'].replace('USDT', ''): float(item['price']) for item in p_res if 'USDT' in item['symbol']}
     except: res["Status"]["Binance"] = "🔴"
 
     # 2. Pacifica (Saatlik Ham Veri -> GÜNLÜK % NET KÂR)
     try:
-        p_data = requests.get("https://api.pacifica.fi/api/v1/info/prices", headers=headers, timeout=5).json()
+        p_data = requests.get("https://api.pacifica.fi/api/v1/info/prices", headers=headers, timeout=2).json()
         if p_data.get("success"):
             for i in p_data.get("data", []):
                 sym = i.get("symbol", "").split("-")[0].upper()
                 funding_val = float(i.get("funding") or 0)
-                # SIFIR HATASINI ÖNLEME
                 if funding_val != 0:
                     res["Pacifica"][sym] = funding_val * 24 * 100
                 
@@ -65,7 +65,7 @@ def fetch_terminal_data():
 
     # 3. Variational (Stats API Yıllık Döndürür -> GÜNLÜK % NET KÂR)
     try:
-        v_data = requests.get("https://omni-client-api.prod.ap-northeast-1.variational.io/metadata/stats", timeout=5).json()
+        v_data = requests.get("https://omni-client-api.prod.ap-northeast-1.variational.io/metadata/stats", timeout=2).json()
         if v_data.get("listings"):
             for i in v_data.get("listings", []):
                 t = i.get("ticker", "").split("-")[0].upper()
@@ -77,25 +77,27 @@ def fetch_terminal_data():
                 if price > 0: res["Prices"][t] = price
     except: pass
 
-    # 4. Reya (Yıllık Döndürür -> GÜNLÜK % NET KÂR)
+    # 4. Reya (REMI DOKÜMAN ENTEGRASYONU)
     try:
-        r_data = requests.get("https://api.reya.xyz/v2/markets/summary", timeout=5).json()
+        r_data = requests.get("https://api.reya.xyz/v2/markets/summary", timeout=2).json()
         for m in r_data:
             s_raw = m.get("symbol", "")
             s = s_raw.replace("RUSDPERP", "").replace("PERP", "").split("-")[0].upper()
-            if s.startswith('K') and len(s) > 1: s = s[1:]
+            if s.startswith('K') and len(s) > 1: s = s[1:] # kBONK -> BONK
             
+            # Reya dokümanına göre fundingRate saatliktir. Günlüğe çevrildi.
             funding_val = float(m.get("fundingRate", "0"))
             if funding_val != 0:
-                res["Reya"][s] = (funding_val / 365) * 100
+                res["Reya"][s] = funding_val * 24 * 100
             
-            price = float(m.get("markPrice", 0))
+            # Reya dokümanına göre işlem gören net fiyat throttledPoolPrice'dır.
+            price = float(m.get("throttledPoolPrice", 0))
             if price > 0: res["Prices"][s] = price
     except: pass
 
     # 5. Lighter (Yıllık Döndürür -> GÜNLÜK % NET KÂR)
     try:
-        l_res = requests.get("https://mainnet.zklighter.elliot.ai/api/v1/markets", timeout=5).json()
+        l_res = requests.get("https://mainnet.zklighter.elliot.ai/api/v1/markets", timeout=2).json()
         for i in l_res:
             s_raw = i.get("symbol", "")
             s = s_raw.replace("-PERP", "").replace("-USD", "").split("-")[0].upper()
@@ -119,7 +121,6 @@ for t in target_tokens:
     pac_daily = data["Pacifica"].get(t)
     price = data["Prices"].get(t, 0.0)
     
-    # KURAL: Pacifica verisi yoksa veya sıfırsa işlemi tamamen pas geç (Hatalı kârı önler)
     if pac_daily is not None and pac_daily != 0 and price > 0:
         comparisons = {
             "Var": data["Variational"].get(t), 
@@ -133,14 +134,9 @@ for t in target_tokens:
         
         for ex_name, ex_daily in comparisons.items():
             if ex_daily is not None and ex_daily != 0:
-                
-                # SENARYO 1: Pacifica SHORT (+1), Karşı Borsa LONG (-1)
                 profit_s1 = (pac_daily * 1) + (ex_daily * -1)
-                
-                # SENARYO 2: Pacifica LONG (-1), Karşı Borsa SHORT (+1)
                 profit_s2 = (pac_daily * -1) + (ex_daily * 1)
                 
-                # Minimum Günlük %0.02 (Yıllık ~%7) Risksiz Net Kâr
                 if profit_s1 > best_net_profit and profit_s1 >= 0.02:
                     best_net_profit = profit_s1
                     best_s_l, best_l_l = "Pac", ex_name
@@ -149,7 +145,6 @@ for t in target_tokens:
                     best_net_profit = profit_s2
                     best_s_l, best_l_l = ex_name, "Pac"
                     
-        # Aşırı uçuk rakamları filtrele (API Bug koruması: Günlük %10 üzeri kâr gerçek dışıdır)
         if 0.02 <= best_net_profit <= 10.0:
             signals.append({"Token": t, "Profit": best_net_profit, "Short": best_s_l, "Long": best_l_l, "Price": price})
 
@@ -225,5 +220,5 @@ with c_exec:
         st.dataframe(df.style.format({"PnL": "{:.6f}$", "Entry": "{:.4f}$"}), width='stretch', hide_index=True)
         if st.button("Emergency Close All", width='stretch'): st.session_state.positions = []; st.rerun()
 
-time.sleep(1)
+time.sleep(1) # Döngü saniyede bir tetikleniyor
 st.rerun()
